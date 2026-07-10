@@ -310,7 +310,7 @@ final class Backfiller {
             if usedIdentityRef, family == .whoop5 {
                 // Type-47 on 5/MG carries its own Unix timestamp and deliberately ignores clock-ref
                 // offset. Identity is the correct mapping here, not a WHOOP 4 correlation failure.
-                line += " · clock ref: WHOOP 5/MG Unix-time mapping active (GET_CLOCK not independently verified)"
+                line += " · clock ref: WHOOP 5/MG Unix-time mapping active"
             } else if usedIdentityRef {
                 line += " · clock ref: IDENTITY fallback (no clock correlation at decode) - stale-record correction OFF"
             } else if abs(offset) > 86_400 {

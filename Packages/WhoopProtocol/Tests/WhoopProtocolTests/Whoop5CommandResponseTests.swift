@@ -8,7 +8,8 @@ import XCTest
 /// capture (firmware 50.38.1.0), not ported on faith:
 ///   • battery: direct percent at pay[2] (the 4.0 deci-percent ÷10 is gone; 47% confirmed vs the app);
 ///   • data-range: real-unix timestamps as 4-byte-aligned u32s → history window;
-///   • firmware version + device name: from the GET_HELLO info block.
+///   • firmware version + device name: from the GET_HELLO info block;
+///   • clock: origin sequence, success result, Unix seconds and subseconds from GET_CLOCK.
 ///
 /// The battery and data-range fixtures are real frames (verified token-free). The GET_HELLO fixture is
 /// **synthetic** — a hand-built frame with a fake device name and the version bytes at their real
@@ -32,6 +33,19 @@ final class Whoop5CommandResponseTests: XCTestCase {
         XCTAssertEqual(f.typeName, "COMMAND_RESPONSE")
         XCTAssertEqual(f.crcOK, true)
         XCTAssertEqual(f.parsed["battery_pct"]?.doubleValue, 47)   // NOT 4.7 — the ÷10 is dropped
+    }
+
+    /// Real GET_CLOCK(11) response captured from a physical WHOOP 5/MG on 2026-07-10.
+    private let clockHex = "aa011400010021b124040b030185a0506a00000000000000896c0950"
+
+    func testClockResponseDecode() {
+        let f = parseFrame(bytes(clockHex), family: .whoop5)
+        XCTAssertEqual(f.typeName, "COMMAND_RESPONSE")
+        XCTAssertEqual(f.crcOK, true)
+        XCTAssertEqual(f.parsed["clock_origin_seq"]?.intValue, 3)
+        XCTAssertEqual(f.parsed["clock_result"]?.intValue, 1)
+        XCTAssertEqual(f.parsed["clock_unix"]?.intValue, 1_783_668_869)
+        XCTAssertEqual(f.parsed["clock_subseconds"]?.intValue, 0)
     }
 
     /// Real GET_DATA_RANGE(34) long response: aligned u32 timestamps spanning 2026-05-10 … 2026-06-08.

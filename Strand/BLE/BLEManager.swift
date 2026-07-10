@@ -3769,10 +3769,16 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         if cmd == Int(WhoopCommand.setClock.rawValue) {
                             log("WHOOP 5/MG: clockState family=whoop5 state=setAcknowledged command=\(cmd) payload=\(hex(payload))")
                         } else if cmd == Int(WhoopCommand.getClock.rawValue) {
-                            // GET_CLOCK is intentionally not decoded until a real 5/MG response capture
-                            // establishes its payload layout. Recording arrival separately from verification
-                            // keeps diagnostics honest while providing the exact bytes needed to finish it.
-                            log("WHOOP 5/MG: clockState family=whoop5 state=responseObserved command=\(cmd) payload=\(hex(payload)) decode=unverified")
+                            let rtc = parsed.parsed["clock_unix"]?.intValue
+                            let result = parsed.parsed["clock_result"]?.intValue
+                            if let rtc, result == 1 {
+                                let wall = Int(Date().timeIntervalSince1970)
+                                let skew = rtc - wall
+                                log("WHOOP 5/MG: clockState family=whoop5 state=verified rtc=\(rtc) wall=\(wall) skewSeconds=\(skew) result=success")
+                            } else {
+                                let resultLabel = result.map(String.init) ?? "nil"
+                                log("WHOOP 5/MG: clockState family=whoop5 state=responseObserved command=\(cmd) payload=\(hex(payload)) decode=failed result=\(resultLabel)")
+                            }
                         }
                     }
                     // NOTE: we deliberately do NOT ingest live 5/MG REALTIME_DATA into the Collector
