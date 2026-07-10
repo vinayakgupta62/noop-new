@@ -184,8 +184,11 @@ public enum ConnectionReadout {
     /// the correlation path logs, or nil when no correlation happened this session. Parsed from the
     /// UNTAGGED log tail (correlation is not a test-mode emitter), so the caller passes the full log lines.
     public static func clockCorrelatedDevice(logLines: [String]) -> Int? {
-        for line in logLines.reversed() where line.contains("Clock correlated:") {
-            return intField(line, key: "device=")
+        for line in logLines.reversed() {
+            // Correlation belongs to one physical connection/family. Never reuse an older session's
+            // "Clock correlated" line after BLEManager explicitly reset it on the latest connect.
+            if line.contains("Clock correlation reset for new") { return nil }
+            if line.contains("Clock correlated:") { return intField(line, key: "device=") }
         }
         return nil
     }
@@ -196,6 +199,59 @@ public enum ConnectionReadout {
     public static func clockLatchedLabel(deviceClockUnix: Int?) -> String {
         guard let d = deviceClockUnix else { return "no (waiting for the strap clock)" }
         return d < ConnectionTrace.rtcEpochCeilingUnix ? "no (RTC reads 1970/71)" : "yes"
+    }
+
+    /// True when the current connection queued the 5/MG SET_CLOCK/GET_CLOCK pair. Stops at the latest
+    /// correlation-reset marker so a reconnect cannot inherit an older session's optimistic state.
+    public static func whoop5ClockSetSent(logLines: [String]) -> Bool {
+        for line in logLines.reversed() {
+            if line.contains("Clock correlation reset for new") { return false }
+            if line.contains("clockState family=whoop5 state=setSent") { return true }
+        }
+        return false
+    }
+
+    /// True when a low-space (11) or MAVERICK high-space (147) GET_CLOCK response was observed this
+    /// connection. Observation is deliberately separate from verification: the payload remains raw until
+    /// its 5/MG layout is established from a real capture.
+    public static func whoop5ClockResponseObserved(logLines: [String]) -> Bool {
+        for line in logLines.reversed() {
+            if line.contains("Clock correlation reset for new") { return false }
+            if line.contains("clockState family=whoop5 state=responseObserved") { return true }
+        }
+        return false
+    }
+
+    /// Model-aware clock status. WHOOP 4 requires a decoded GET_CLOCK correlation; WHOOP 5/MG timestamps
+    /// are already Unix seconds, so identity mapping is expected and absence of the WHOOP 4 correlation
+    /// is not a failed latch. Recent banked records may corroborate alignment without pretending that a
+    /// GET_CLOCK payload was decoded.
+    public static func clockStatusLabel(isWhoop5: Bool,
+                                        deviceClockUnix: Int?,
+                                        strapNewestUnix: Int?,
+                                        wallNowUnix: Int,
+                                        setSent: Bool,
+                                        responseObserved: Bool) -> String {
+        guard isWhoop5 else { return clockLatchedLabel(deviceClockUnix: deviceClockUnix) }
+
+        if let newest = strapNewestUnix, newest > 0 {
+            if newest < ConnectionTrace.rtcEpochCeilingUnix {
+                return "stale RTC detected (reads 1970/71)"
+            }
+            if newest > wallNowUnix + 120 {
+                return "future RTC detected"
+            }
+            if abs(newest - wallNowUnix) <= 5 * 60 {
+                return "Unix-time mapping active; records aligned with wall time (GET_CLOCK unverified)"
+            }
+        }
+        if responseObserved {
+            return "GET_CLOCK response observed; payload format unverified"
+        }
+        if setSent {
+            return "SET_CLOCK sent; awaiting verification"
+        }
+        return "Unix-time mapping active; no clock response observed"
     }
 
     /// #987: a plain-words warning when the strap RTC reads epoch-era (~1970/71), from EITHER signal we
