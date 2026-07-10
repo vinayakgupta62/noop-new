@@ -67,6 +67,19 @@ final class BackfillerSessionTallyTests: XCTestCase {
         XCTAssertEqual(line, "Backfill: rows landed on 2024-03-24 · clock ref: IDENTITY fallback (no clock correlation at decode) - stale-record correction OFF")
     }
 
+    // WHOOP 5/MG type-47 records carry Unix timestamps. Identity is the intended mapping and must
+    // never be labelled as the WHOOP 4 fallback/failure.
+    func testClockDiagWhoop5IdentityIsExpectedUnixMapping() {
+        let day = 1_783_664_123 / 86_400
+        let line = Backfiller.sessionClockDiagLine(
+            nightKeys: [day], device: 1_783_664_123, wall: 1_783_664_123,
+            usedIdentityRef: true, family: .whoop5)
+        XCTAssertTrue(line!.contains("WHOOP 5/MG Unix-time mapping active"), line ?? "")
+        XCTAssertTrue(line!.contains("GET_CLOCK not independently verified"), line ?? "")
+        XCTAssertFalse(line!.contains("IDENTITY fallback"), line ?? "")
+        XCTAssertFalse(line!.contains("correction OFF"), line ?? "")
+    }
+
     // A genuinely stale-but-correlated ref: the correction IS engaged and the behind-by days are named.
     func testClockDiagCorrelatedStaleRefReportsCorrectionEngaged() {
         let day = 1_711_276_123 / 86_400
