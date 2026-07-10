@@ -528,7 +528,9 @@ private struct ConnectionReadoutPanel: View {
         // LiveState field FrameRouter writes.
         // A 5/MG deliberately uses Unix-time identity mapping, not the WHOOP 4 correlation.
         // Ignore any older WHOOP 4 line and display the actual observed 5/MG state.
-        let deviceClock = isWhoop5 ? nil : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        let deviceClock = isWhoop5
+            ? ConnectionReadout.whoop5VerifiedClock(logLines: live.log)
+            : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
         let clockStatus = ConnectionReadout.clockStatusLabel(
             isWhoop5: isWhoop5,
             deviceClockUnix: deviceClock,

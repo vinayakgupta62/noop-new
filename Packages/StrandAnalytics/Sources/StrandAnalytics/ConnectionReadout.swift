@@ -211,15 +211,25 @@ public enum ConnectionReadout {
         return false
     }
 
-    /// True when a low-space (11) or MAVERICK high-space (147) GET_CLOCK response was observed this
-    /// connection. Observation is deliberately separate from verification: the payload remains raw until
-    /// its 5/MG layout is established from a real capture.
+    /// True when a GET_CLOCK response was observed this connection but could not be verified.
     public static func whoop5ClockResponseObserved(logLines: [String]) -> Bool {
         for line in logLines.reversed() {
             if line.contains("Clock correlation reset for new") { return false }
+            if line.contains("clockState family=whoop5 state=verified") { return false }
             if line.contains("clockState family=whoop5 state=responseObserved") { return true }
         }
         return false
+    }
+
+    /// The verified 5/MG RTC from the latest connection-scoped GET_CLOCK response.
+    public static func whoop5VerifiedClock(logLines: [String]) -> Int? {
+        for line in logLines.reversed() {
+            if line.contains("Clock correlation reset for new") { return nil }
+            if line.contains("clockState family=whoop5 state=verified") {
+                return intField(line, key: "rtc=")
+            }
+        }
+        return nil
     }
 
     /// Model-aware clock status. WHOOP 4 requires a decoded GET_CLOCK correlation; WHOOP 5/MG timestamps
@@ -234,6 +244,16 @@ public enum ConnectionReadout {
                                         responseObserved: Bool) -> String {
         guard isWhoop5 else { return clockLatchedLabel(deviceClockUnix: deviceClockUnix) }
 
+        if let rtc = deviceClockUnix {
+            if rtc < ConnectionTrace.rtcEpochCeilingUnix {
+                return "stale RTC detected (reads 1970/71)"
+            }
+            let skew = rtc - wallNowUnix
+            if skew > 120 { return "future RTC detected (\(skew)s ahead)" }
+            if skew < -120 { return "stale RTC detected (\(-skew)s behind)" }
+            return "Verified: strap RTC matches wall time (skew \(skew)s)"
+        }
+
         if let newest = strapNewestUnix, newest > 0 {
             if newest < ConnectionTrace.rtcEpochCeilingUnix {
                 return "stale RTC detected (reads 1970/71)"
@@ -242,7 +262,7 @@ public enum ConnectionReadout {
                 return "future RTC detected"
             }
             if abs(newest - wallNowUnix) <= 5 * 60 {
-                return "Unix-time mapping active; records aligned with wall time (GET_CLOCK unverified)"
+                return "Unix-time mapping active; records aligned with wall time"
             }
         }
         if responseObserved {
