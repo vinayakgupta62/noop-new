@@ -189,6 +189,10 @@ final class ConnectionReadoutTests: XCTestCase {
         ]
         XCTAssertTrue(ConnectionReadout.whoop5ClockSetSent(logLines: lines))
         XCTAssertTrue(ConnectionReadout.whoop5ClockResponseObserved(logLines: lines))
+        XCTAssertNil(ConnectionReadout.whoop5VerifiedClock(logLines: lines))
+        let verified = lines + ["WHOOP 5/MG: clockState family=whoop5 state=verified rtc=1783668869 wall=1783668870 skewSeconds=-1 result=success"]
+        XCTAssertEqual(ConnectionReadout.whoop5VerifiedClock(logLines: verified), 1_783_668_869)
+        XCTAssertFalse(ConnectionReadout.whoop5ClockResponseObserved(logLines: verified))
         XCTAssertFalse(ConnectionReadout.whoop5ClockSetSent(logLines: lines + ["Clock correlation reset for new whoop5 connection"]))
     }
 
@@ -203,7 +207,12 @@ final class ConnectionReadoutTests: XCTestCase {
             ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: wall - 5, wallNowUnix: wall,
                 setSent: true, responseObserved: false),
-            "Unix-time mapping active; records aligned with wall time (GET_CLOCK unverified)")
+            "Unix-time mapping active; records aligned with wall time")
+        XCTAssertEqual(
+            ConnectionReadout.clockStatusLabel(
+                isWhoop5: true, deviceClockUnix: wall - 1, strapNewestUnix: nil, wallNowUnix: wall,
+                setSent: true, responseObserved: false),
+            "Verified: strap RTC matches wall time (skew -1s)")
         XCTAssertEqual(
             ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: nil, wallNowUnix: wall,

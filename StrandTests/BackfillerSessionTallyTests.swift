@@ -75,7 +75,7 @@ final class BackfillerSessionTallyTests: XCTestCase {
             nightKeys: [day], device: 1_783_664_123, wall: 1_783_664_123,
             usedIdentityRef: true, family: .whoop5)
         XCTAssertTrue(line!.contains("WHOOP 5/MG Unix-time mapping active"), line ?? "")
-        XCTAssertTrue(line!.contains("GET_CLOCK not independently verified"), line ?? "")
+        XCTAssertFalse(line!.contains("GET_CLOCK not independently verified"), line ?? "")
         XCTAssertFalse(line!.contains("IDENTITY fallback"), line ?? "")
         XCTAssertFalse(line!.contains("correction OFF"), line ?? "")
     }

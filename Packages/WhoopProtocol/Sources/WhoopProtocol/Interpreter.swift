@@ -675,16 +675,28 @@ public func whoop5HistoricalAckFrame(endData: [UInt8], seq: UInt8) -> [UInt8] {
 ///
 /// The response command is at frame[10] (the 4.0 frame[6] + 4) and its payload at frame[11]. WHOOP 5
 /// reuses the 4.0 command NUMBERS, but the response PAYLOADS differ from 4.0 — so each field below is
-/// mapped from a real WHOOP 5 capture (firmware 50.38.1.0), not ported on faith. Commands that return
-/// a short stub on this firmware (REPORT_VERSION_INFO / GET_EXTENDED_BATTERY_INFO) or aren't served
-/// (GET_CLOCK — unneeded, since realtime + historical carry real unix) are intentionally left undecoded.
+/// mapped from real WHOOP 5 captures, not ported on faith. GET_CLOCK is verified from a physical MG
+/// capture: payload `[origin_seq, result, unix u32 LE, subseconds u32 LE, padding…]`.
 private func decodeWhoop5CommandResponse(_ frame: [UInt8], fb: FieldBuilder, schema: Schema, payloadEnd: Int?) {
     guard let payloadEnd = payloadEnd, 11 < payloadEnd, payloadEnd <= frame.count else { return }
     let respCmd = Int(frame[10])
     let name = schema.enumName("CommandNumber", respCmd)   // e.g. "GET_BATTERY_LEVEL(26)"
     let pay = Array(frame[11..<payloadEnd])
     fb.region(11, payloadEnd, "response payload", "cmd")
-    if name.hasPrefix("GET_BATTERY_LEVEL"), pay.count >= 3 {
+    if name.hasPrefix("GET_CLOCK"), pay.count >= 10 {
+        let origin = Int(pay[0])
+        let result = Int(pay[1])
+        let unix = Int(pay[2]) | (Int(pay[3]) << 8) | (Int(pay[4]) << 16) | (Int(pay[5]) << 24)
+        let subseconds = Int(pay[6]) | (Int(pay[7]) << 8) | (Int(pay[8]) << 16) | (Int(pay[9]) << 24)
+        fb.parsed["clock_origin_seq"] = .int(origin)
+        fb.parsed["clock_result"] = .int(result)
+        fb.parsed["clock_unix"] = .int(unix)
+        fb.parsed["clock_subseconds"] = .int(subseconds)
+        fb.add(11, 1, "clock_origin_seq", "clock", value: .int(origin))
+        fb.add(12, 1, "clock_result", "clock", value: .int(result), note: "1 = success")
+        fb.add(13, 4, "clock_unix", "time", value: .int(unix), note: "Unix seconds")
+        fb.add(17, 4, "clock_subseconds", "time", value: .int(subseconds))
+    } else if name.hasPrefix("GET_BATTERY_LEVEL"), pay.count >= 3 {
         // Direct percent at pay[2] (47% confirmed against the app) — the 4.0 deci-percent ÷10 is gone.
         fb.add(11 + 2, 1, "battery_pct", "battery", value: .double(Double(pay[2])), note: "%")
     } else if name.hasPrefix("GET_DATA_RANGE"), pay.count >= 7 {

@@ -73,7 +73,9 @@ private struct DevicesContent: View {
     private var strapClockState: (line: String, warning: String?)? {
         guard live.connected else { return nil }
         let isWhoop5 = model.whoop5Detected
-        let deviceClock = isWhoop5 ? nil : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        let deviceClock = isWhoop5
+            ? ConnectionReadout.whoop5VerifiedClock(logLines: live.log)
+            : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
         let setSent = ConnectionReadout.whoop5ClockSetSent(logLines: live.log)
         let responseObserved = ConnectionReadout.whoop5ClockResponseObserved(logLines: live.log)
         guard deviceClock != nil || live.strapRange != nil || live.lastFrameAtUnix != nil || setSent else { return nil }
