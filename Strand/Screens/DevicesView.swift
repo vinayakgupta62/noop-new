@@ -69,14 +69,23 @@ private struct DevicesContent: View {
     /// both the line and the warning (the log scan is the cost worth paying once, not twice).
     private var strapClockState: (line: String, warning: String?)? {
         guard live.connected else { return nil }
-        let deviceClock = ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
-        guard deviceClock != nil || live.strapRange != nil || live.lastFrameAtUnix != nil else { return nil }
-        let latched = ConnectionReadout.clockLatchedLabel(deviceClockUnix: deviceClock)
-        let frame = ConnectionReadout.lastFrameLabel(lastFrameUnix: live.lastFrameAtUnix,
-                                                     nowUnix: Int(Date().timeIntervalSince1970))
+        let isWhoop5 = model.whoop5Detected
+        let deviceClock = isWhoop5 ? nil : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        let setSent = ConnectionReadout.whoop5ClockSetSent(logLines: live.log)
+        let responseObserved = ConnectionReadout.whoop5ClockResponseObserved(logLines: live.log)
+        guard deviceClock != nil || live.strapRange != nil || live.lastFrameAtUnix != nil || setSent else { return nil }
+        let now = Int(Date().timeIntervalSince1970)
+        let status = ConnectionReadout.clockStatusLabel(
+            isWhoop5: isWhoop5,
+            deviceClockUnix: deviceClock,
+            strapNewestUnix: live.strapRange?.newestUnix,
+            wallNowUnix: now,
+            setSent: setSent,
+            responseObserved: responseObserved)
+        let frame = ConnectionReadout.lastFrameLabel(lastFrameUnix: live.lastFrameAtUnix, nowUnix: now)
         let warning = ConnectionReadout.rtcWarning(deviceClockUnix: deviceClock,
                                                    strapNewestUnix: live.strapRange?.newestUnix)
-        return (String(localized: "Clock latched: \(latched) · last frame \(frame)"), warning)
+        return (String(localized: "Clock: \(status) · last frame \(frame)"), warning)
     }
 
     var body: some View {
@@ -281,7 +290,7 @@ private struct DeviceCard: View {
     /// The active+connected strap's firmware version (from the connect handshake). nil when not the
     /// active/connected device, or for a source that reports no firmware (e.g. a non-WHOOP strap).
     var liveFirmware: String? = nil
-    /// #987: the active+connected strap's clock-state line ("Clock latched: yes · last frame 12s ago"),
+    /// #987: the active+connected strap's model-aware clock-state line plus frame freshness,
     /// nil for every other card. Built by the parent off the same pure ConnectionReadout parsers the
     /// Test Centre Connection panel binds, so the two readouts can never disagree.
     var liveClockLine: String? = nil

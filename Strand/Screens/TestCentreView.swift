@@ -401,7 +401,7 @@ private struct TestModeRow: View {
                 BatteryReadoutPanel(live: live)
             }
             if on, mode.domain == .connection {
-                ConnectionReadoutPanel(live: live)
+                ConnectionReadoutPanel(live: live, isWhoop5: model.whoop5Detected)
             }
             if on, mode.domain == .recovery {
                 RecoveryReadoutPanel(live: live)
@@ -505,6 +505,7 @@ private struct BatteryReadoutPanel: View {
 /// same ReadoutRow tokens as the other panels. No em-dash in any string here.
 private struct ConnectionReadoutPanel: View {
     @ObservedObject var live: LiveState
+    let isWhoop5: Bool
 
     var body: some View {
         let tail = live.taggedTail(domain: .connection)
@@ -525,7 +526,16 @@ private struct ConnectionReadoutPanel: View {
         // #987: clock latch + frame liveness. The correlated device clock is parsed from the same log the
         // export ships (pure ConnectionReadout parsers), the last-frame stamp off the non-published
         // LiveState field FrameRouter writes.
-        let deviceClock = ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        // A 5/MG deliberately uses Unix-time identity mapping, not the WHOOP 4 correlation.
+        // Ignore any older WHOOP 4 line and display the actual observed 5/MG state.
+        let deviceClock = isWhoop5 ? nil : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        let clockStatus = ConnectionReadout.clockStatusLabel(
+            isWhoop5: isWhoop5,
+            deviceClockUnix: deviceClock,
+            strapNewestUnix: live.strapRange?.newestUnix,
+            wallNowUnix: now,
+            setSent: ConnectionReadout.whoop5ClockSetSent(logLines: live.log),
+            responseObserved: ConnectionReadout.whoop5ClockResponseObserved(logLines: live.log))
         let rtcWarning = ConnectionReadout.rtcWarning(deviceClockUnix: deviceClock,
                                                       strapNewestUnix: live.strapRange?.newestUnix)
         VStack(alignment: .leading, spacing: 4) {
@@ -535,8 +545,7 @@ private struct ConnectionReadoutPanel: View {
             ReadoutRow(label: String(localized: "Rows drained (session)"),
                        value: sessionRows.map(String.init) ?? String(localized: "no offload yet"))
             ReadoutRow(label: String(localized: "Rows drained (all time)"), value: String(allTimeRows))
-            ReadoutRow(label: String(localized: "Clock latched"),
-                       value: ConnectionReadout.clockLatchedLabel(deviceClockUnix: deviceClock))
+            ReadoutRow(label: String(localized: "Clock status"), value: clockStatus)
             ReadoutRow(label: String(localized: "Last frame"),
                        value: ConnectionReadout.lastFrameLabel(lastFrameUnix: live.lastFrameAtUnix, nowUnix: now))
             if let rtcWarning {

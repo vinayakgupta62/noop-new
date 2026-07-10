@@ -292,7 +292,8 @@ final class Backfiller {
     /// fallback, or an in-sync ref on a strap that banked stale), the night is misdated off the recent
     /// timeline — the "missed sleep" signature (#67). Returns nil when nothing landed. Log-only, pure.
     nonisolated static func sessionClockDiagLine(nightKeys: Set<Int>,
-                                                 device: Int?, wall: Int?, usedIdentityRef: Bool) -> String? {
+                                                 device: Int?, wall: Int?, usedIdentityRef: Bool,
+                                                 family: DeviceFamily = .whoop4) -> String? {
         guard let lo = nightKeys.min(), let hi = nightKeys.max() else { return nil }
         let day: (Int) -> String = { key in
             let f = DateFormatter()
@@ -306,7 +307,11 @@ final class Backfiller {
         if let device, let wall {
             let offset = wall - device
             let days = offset / 86_400
-            if usedIdentityRef {
+            if usedIdentityRef, family == .whoop5 {
+                // Type-47 on 5/MG carries its own Unix timestamp and deliberately ignores clock-ref
+                // offset. Identity is the correct mapping here, not a WHOOP 4 correlation failure.
+                line += " · clock ref: WHOOP 5/MG Unix-time mapping active (GET_CLOCK not independently verified)"
+            } else if usedIdentityRef {
                 line += " · clock ref: IDENTITY fallback (no clock correlation at decode) - stale-record correction OFF"
             } else if abs(offset) > 86_400 {
                 line += " · strap clock \(days >= 0 ? "\(days)d behind" : "\(-days)d ahead") wall - correction engaged"

@@ -452,8 +452,11 @@ public final class BLEManager: NSObject, ObservableObject {
     // WHOOP 5.0 / MG ("puffin") characteristics under the fd4b service. EXPERIMENTAL — see the
     // whoop5 connect path in didDiscoverCharacteristics. fd4b0002 takes the static CLIENT_HELLO.
     static let whoop5CmdWriteChar = CBUUID(string: "fd4b0002-cce1-4033-93ce-002d5875f58a")
+    /// Puffin command responses have been captured on fd4b0003. Clock/range requests must not be
+    /// sent until CoreBluetooth confirms this subscription, otherwise a fast response can be lost.
+    static let whoop5CommandNotifyChar = CBUUID(string: "fd4b0003-cce1-4033-93ce-002d5875f58a")
     static let whoop5NotifyChars: [CBUUID] = [
-        CBUUID(string: "fd4b0003-cce1-4033-93ce-002d5875f58a"),
+        whoop5CommandNotifyChar,
         CBUUID(string: "fd4b0004-cce1-4033-93ce-002d5875f58a"),
         CBUUID(string: "fd4b0005-cce1-4033-93ce-002d5875f58a"),
         CBUUID(string: "fd4b0007-cce1-4033-93ce-002d5875f58a"),
@@ -671,6 +674,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// startBackfillTimer). Stops the HISTORY_END acks re-entering didWriteValueFor from re-triggering
     /// the offload mid-stream (the 5/MG twin of the WHOOP4 connectHandshakeDone ack-storm guard).
     private var whoop5SessionStarted = false
+    /// Fail-open timer for a firmware/stack that never confirms fd4b0003 notification readiness.
+    /// A missing response channel must weaken verification, not block SET_CLOCK or history forever.
+    private var whoop5SessionStartFallback: DispatchWorkItem?
+    /// True when the fail-open path sent GET_CLOCK before fd4b0003 became active. Once notifications
+    /// do become active, retry GET_CLOCK exactly once so a fast first response is not permanently lost.
+    private var whoop5ClockSentBeforeResponseNotify = false
+    private var whoop5GetClockRetriedAfterNotify = false
     /// Backfill ACKs can arrive hundreds or thousands of times in one offload. Keep the strap log
     /// readable and avoid forcing SwiftUI to auto-scroll on every ACK row.
     private var historicalAckLogCounter = 0
@@ -1396,8 +1406,10 @@ public final class BLEManager: NSObject, ObservableObject {
             let puffinPayload: [UInt8] = isHaptics ? [0x01, 47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0] : payload
             seq = seq &+ 1
             let frame = puffinCommandFrame(cmd: puffinCmd, seq: seq, payload: puffinPayload)
+            let isClockCommand = command == .setClock || command == .getClock
             p.writeValue(Data(frame), for: ch, type: writeType)
             let cmdNote = isHaptics ? " cmd=0x13" : ""
+            let clockTrace = isClockCommand ? " seq=\(seq) char=\(ch.uuid.uuidString)" : ""
             if command == .historicalDataResult {
                 historicalAckLogCounter += 1
                 if historicalAckLogCounter == 1 || historicalAckLogCounter.isMultiple(of: 25) {
@@ -1405,7 +1417,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 }
                 return
             }
-            log("→ \(command.label) payload=\(hex(puffinPayload)) (puffin\(cmdNote))")
+            log("→ \(command.label)\(clockTrace) payload=\(hex(puffinPayload)) (puffin\(cmdNote))")
             return
         }
         seq = seq &+ 1
@@ -1631,7 +1643,8 @@ public final class BLEManager: NSObject, ObservableObject {
             if let diag = Backfiller.sessionClockDiagLine(nightKeys: bf.sessionNightKeys,
                                                           device: bf.sessionClockDevice,
                                                           wall: bf.sessionClockWall,
-                                                          usedIdentityRef: bf.sessionUsedIdentityRef) {
+                                                          usedIdentityRef: bf.sessionUsedIdentityRef,
+                                                          family: selectedModel.deviceFamily) {
                 log(diag)
             }
         }
@@ -2706,6 +2719,13 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // only — BLEManager stays decoupled from the store and the connect flow below is unchanged.
         connectedPeripheralUUID = peripheral.identifier.uuidString
         state.connected = true
+        // Clock correlation is per connection and per family. Reusing a WHOOP 4 correlation after a
+        // reconnect/reset, or carrying it into a 5/MG session, makes both decode and diagnostics lie.
+        clockRef = nil
+        backfiller?.clockRef = nil
+        clockRequested = false
+        configureCollectorFamily()   // installs 5/MG identity mapping; leaves WHOOP 4 waiting for GET_CLOCK
+        log("Clock correlation reset for new \(selectedModel.deviceFamily == .whoop5 ? "whoop5" : "whoop4") connection")
         // A connect succeeded → clear the stale-bond re-pair guide UNLESS we are in a known bond-loop
         // (#617). In that loop the strap "connects" every ~3 s before timing out again, so clearing here
         // wiped the guide on EVERY cycle: it flashed for ~1 s and vanished, so the user could never read it
@@ -2817,6 +2837,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // stream comes back automatically.
         realtimeArmed = false
         whoop5SessionStarted = false
+        whoop5SessionStartFallback?.cancel()
+        whoop5SessionStartFallback = nil
+        whoop5ClockSentBeforeResponseNotify = false
+        whoop5GetClockRetriedAfterNotify = false
         clockRequested = false
         connectHandshakeDone = false
         realtimeArmedAt = nil   // cleared after the marginal-radio detector above read it (#80)
@@ -3047,7 +3071,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // fires for a 5/MG strap. Live HR/battery come from the standard profiles; this just
                 // opens the puffin session. Unverified on real MG hardware.
                 cmdCharacteristic = c
-                if let hello = selectedModel.deviceFamily.clientHello {
+                if didBond || connectHandshakeDone || whoop5SessionStarted {
+                    // A service refresh (notably Add-a-WHOOP while already connected) rediscovered this
+                    // characteristic and used to re-send CLIENT_HELLO mid-offload. Keep the refreshed
+                    // reference, but do not restart an already-authenticated Puffin session.
+                    log("WHOOP 5/MG: command characteristic refreshed — session already active; CLIENT_HELLO not repeated")
+                } else if let hello = selectedModel.deviceFamily.clientHello {
                     // CONTRIBUTOR FIX (issue #17 — diagnosed from the logs, unverified on hardware here):
                     // write CLIENT_HELLO with .withResponse so CoreBluetooth runs just-works bonding when
                     // the link needs authenticating, AND so didWriteValueFor fires. That callback is where
@@ -3085,7 +3114,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // is insufficient", which (per a 5/MG owner's verified flow, issue #17) also wedges the bond.
                 // didWriteValueFor subscribes them once the CLIENT_HELLO .withResponse write confirms.
                 if BLEManager.whoop5NotifyChars.contains(c.uuid) {
-                    whoop5NotifyCharacteristics.append(c)
+                    // Service refreshes can hand us new CBCharacteristic objects for the same UUID.
+                    // Replace by UUID instead of accumulating duplicates across Add-a-WHOOP refreshes.
+                    if let i = whoop5NotifyCharacteristics.firstIndex(where: { $0.uuid == c.uuid }) {
+                        whoop5NotifyCharacteristics[i] = c
+                    } else {
+                        whoop5NotifyCharacteristics.append(c)
+                    }
+                    // A live-session service refresh skips CLIENT_HELLO above, so it also loses that
+                    // write callback's subscription loop. Re-arm only characteristics CoreBluetooth
+                    // actually reports inactive; active offload channels are left untouched.
+                    if didBond, !c.isNotifying {
+                        requestNotify(c, on: peripheral, reason: "service refresh puffin")
+                    }
                 }
             }
         }
@@ -3213,26 +3254,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // re-subscribe + realtime-arm above are idempotent and intentionally run on every re-entry;
             // only this block is gated. `whoop5SessionStarted` resets on disconnect.
             if !whoop5SessionStarted {
-                whoop5SessionStarted = true
-                connectHandshakeDone = true     // unblocks beginBackfill()'s guard
-                log("WHOOP 5/MG: connect handshake done — backfill unblocked")
-                // Re-apply the Broadcast-HR device-config flag if the user opted in (#181).
-                if PuffinExperiment.broadcastHrEnabled { setBroadcastHr(true) }
-                // Clock the strap BEFORE history: an un-clocked WHOOP 5 discards sensor data ("RTC
-                // timestamp … is invalid; not saving data to flash") and history offloads "succeed"
-                // with metadata only. Same 8-byte payload as the WHOOP4 handshake, puffin-framed;
-                // GET_CLOCK's reply rides the puffin notify chars and never touches the WHOOP4
-                // clockRef correlation path. The 1.5s deferral below keeps clock-before-history.
-                // Hardware-validated ordering (#78 fork).
-                send(.setClock, payload: BLEManager.setClockPayload())
-                send(.getClock, payload: [])
-                log("WHOOP 5/MG: clock synced (set/get) — strap can persist history now")
-                log("WHOOP 5/MG: scheduling first historical offload (connect)")
-                // Deferred ~1.5s so the puffin notify subscriptions settle before SEND_HISTORICAL_DATA,
-                // mirroring the WHOOP4 kick. requestSync → beginBackfill is itself gated on
-                // connectHandshakeDone, so a racing foreground/restore trigger can't fire it early.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
-                startBackfillTimer()            // re-offload the type-47 store every backfillIntervalSeconds
+                scheduleWhoop5SessionStart()
             }
             return
         }
@@ -3315,6 +3337,56 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 realtimeArmedAt = Date()   // start the arm→drop stopwatch for the marginal-radio detector
             }
         }
+    }
+
+    /// Start the 5/MG clock/history tail only after fd4b0003 can carry command responses.
+    /// CoreBluetooth notification subscription is asynchronous; requesting it is not readiness.
+    /// Fail open after 2s so a broken CCCD can reduce verification but never block clocking/history.
+    private func scheduleWhoop5SessionStart() {
+        guard selectedModel.deviceFamily == .whoop5, didBond, !whoop5SessionStarted else { return }
+        let responseReady = whoop5NotifyCharacteristics.first {
+            $0.uuid == BLEManager.whoop5CommandNotifyChar
+        }?.isNotifying == true
+        if responseReady {
+            startWhoop5Session(responseNotifyReady: true)
+            return
+        }
+        guard whoop5SessionStartFallback == nil else { return }
+        log("WHOOP 5/MG: waiting for Puffin command-response notifications before clock commands")
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.whoop5SessionStartFallback = nil
+            self.startWhoop5Session(responseNotifyReady: false)
+        }
+        whoop5SessionStartFallback = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    private func startWhoop5Session(responseNotifyReady: Bool) {
+        guard selectedModel.deviceFamily == .whoop5, state.connected, didBond,
+              !whoop5SessionStarted else { return }
+        whoop5SessionStartFallback?.cancel()
+        whoop5SessionStartFallback = nil
+        whoop5SessionStarted = true
+        connectHandshakeDone = true     // unblocks beginBackfill()'s guard
+        log("WHOOP 5/MG: connect handshake done — backfill unblocked")
+        // Re-apply the Broadcast-HR device-config flag if the user opted in (#181).
+        if PuffinExperiment.broadcastHrEnabled { setBroadcastHr(true) }
+        // Clock the strap BEFORE history: an un-clocked WHOOP 5 discards sensor data. This records
+        // transmission state only; it is NOT confirmation that SET_CLOCK latched or GET_CLOCK replied.
+        whoop5ClockSentBeforeResponseNotify = !responseNotifyReady
+        clockRequested = true
+        send(.setClock, payload: BLEManager.setClockPayload())
+        send(.getClock, payload: [])
+        if responseNotifyReady {
+            log("WHOOP 5/MG: clock commands queued after response notifications became active — awaiting verification")
+        } else {
+            log("WHOOP 5/MG: clock commands queued without confirmed response notifications — verification unavailable; history continues fail-open")
+        }
+        log("WHOOP 5/MG: clockState family=whoop5 state=setSent verification=awaiting")
+        log("WHOOP 5/MG: scheduling first historical offload (connect)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
+        startBackfillTimer()
     }
 
     /// SET_CLOCK(10) payload — the 8-byte form `[seconds u32 LE][subseconds u32 LE]`, subseconds in
@@ -3541,7 +3613,35 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         router.dispatchLiveGestureIfFresh(frame: frame, now: strapClockNow)
                         continue
                     }
-                    router.handle(frame: frame)
+                    let parsed = parseFrame(frame, family: .whoop5)
+                    router.handle(parsed: parsed, frame: frame)
+                    if parsed.typeName == "COMMAND_RESPONSE", frame.count > 14 {
+                        // WHOOP 5 COMMAND_RESPONSE inner layout is [type, seq, command, payload…] at
+                        // offsets 8, 9, 10, 11. Unlike WHOOP 4, there is no proven origin-sequence/result
+                        // prefix here: real battery/data-range captures decode their payload from byte 11.
+                        let cmd = Int(frame[10])
+                        let payloadEnd = frame.count - 4   // CRC32 trailer
+                        let payload = payloadEnd > 11 ? Array(frame[11..<payloadEnd]) : []
+                        let commandName = parsed.cmdName ?? "cmd\(cmd)"
+                        if TestCentre.active(.connection) {
+                            let rawClock = cmd == Int(WhoopCommand.getClock.rawValue)
+                                ? " raw=\(hex(frame))" : ""
+                            state.append(
+                                log: "puffinResponse char=\(characteristic.uuid.uuidString) "
+                                    + "frameType=COMMAND_RESPONSE seq=\(parsed.seq.map { String($0) } ?? "nil") "
+                                    + "command=\(commandName) payloadBytes=\(payload.count) "
+                                    + "payload=\(hex(payload))\(rawClock)",
+                                domain: .connection)
+                        }
+                        if cmd == Int(WhoopCommand.setClock.rawValue) {
+                            log("WHOOP 5/MG: clockState family=whoop5 state=setAcknowledged command=\(cmd) payload=\(hex(payload))")
+                        } else if cmd == Int(WhoopCommand.getClock.rawValue) {
+                            // GET_CLOCK is intentionally not decoded until a real 5/MG response capture
+                            // establishes its payload layout. Recording arrival separately from verification
+                            // keeps diagnostics honest while providing the exact bytes needed to finish it.
+                            log("WHOOP 5/MG: clockState family=whoop5 state=responseObserved command=\(cmd) payload=\(hex(payload)) decode=unverified")
+                        }
+                    }
                     // NOTE: we deliberately do NOT ingest live 5/MG REALTIME_DATA into the Collector
                     // here. For a 5/MG the standard 0x2A37 Heart-Rate profile is already the RELIABLE,
                     // continuously-persisted live source (see didUpdateValueFor 0x2A37 → ingestStandardHR);
@@ -3562,6 +3662,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             log("Notify enable failed for \(characteristic.uuid): \(error.localizedDescription)")
         } else {
             log("Notify \(characteristic.isNotifying ? "active" : "off") \(characteristic.uuid)")
+            guard selectedModel.deviceFamily == .whoop5,
+                  characteristic.uuid == BLEManager.whoop5CommandNotifyChar,
+                  characteristic.isNotifying else { return }
+            if !whoop5SessionStarted {
+                // The normal path: fd4b0003 is ready, so SET_CLOCK/GET_CLOCK can no longer outrun it.
+                startWhoop5Session(responseNotifyReady: true)
+            } else if whoop5ClockSentBeforeResponseNotify, !whoop5GetClockRetriedAfterNotify {
+                // Fail-open may have sent the first request before this callback. Retry only GET_CLOCK;
+                // SET_CLOCK is safe and already queued, while a second read gives verification one chance.
+                whoop5GetClockRetriedAfterNotify = true
+                send(.getClock, payload: [])
+                log("WHOOP 5/MG: response notifications became active after fail-open — GET_CLOCK retried once")
+            }
         }
     }
 }
