@@ -531,11 +531,15 @@ private struct ConnectionReadoutPanel: View {
         let deviceClock = isWhoop5
             ? ConnectionReadout.whoop5VerifiedClock(logLines: live.log)
             : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        let measuredClockSkew = isWhoop5
+            ? ConnectionReadout.whoop5VerifiedClockSkew(logLines: live.log)
+            : nil
         let clockStatus = ConnectionReadout.clockStatusLabel(
             isWhoop5: isWhoop5,
             deviceClockUnix: deviceClock,
             strapNewestUnix: live.strapRange?.newestUnix,
             wallNowUnix: now,
+            measuredClockSkew: measuredClockSkew,
             setSent: ConnectionReadout.whoop5ClockSetSent(logLines: live.log),
             responseObserved: ConnectionReadout.whoop5ClockResponseObserved(logLines: live.log))
         let rtcWarning = ConnectionReadout.rtcWarning(deviceClockUnix: deviceClock,

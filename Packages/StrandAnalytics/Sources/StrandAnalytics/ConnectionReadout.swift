@@ -232,14 +232,27 @@ public enum ConnectionReadout {
         return nil
     }
 
+    /// The measured 5/MG clock skew from the latest connection-scoped verified GET_CLOCK response.
+    public static func whoop5VerifiedClockSkew(logLines: [String]) -> Int? {
+        for line in logLines.reversed() {
+            if line.contains("Clock correlation reset for new") { return nil }
+            if line.contains("clockState family=whoop5 state=verified") {
+                return intField(line, key: "skewSeconds=")
+            }
+        }
+        return nil
+    }
+
     /// Model-aware clock status. WHOOP 4 requires a decoded GET_CLOCK correlation; WHOOP 5/MG timestamps
     /// are already Unix seconds, so identity mapping is expected and absence of the WHOOP 4 correlation
     /// is not a failed latch. Recent banked records may corroborate alignment without pretending that a
-    /// GET_CLOCK payload was decoded.
+    /// GET_CLOCK payload was decoded. A verified 5/MG response displays the skew measured when that
+    /// response arrived, never a live subtraction from the old RTC snapshot.
     public static func clockStatusLabel(isWhoop5: Bool,
                                         deviceClockUnix: Int?,
                                         strapNewestUnix: Int?,
                                         wallNowUnix: Int,
+                                        measuredClockSkew: Int?,
                                         setSent: Bool,
                                         responseObserved: Bool) -> String {
         guard isWhoop5 else { return clockLatchedLabel(deviceClockUnix: deviceClockUnix) }
@@ -248,10 +261,12 @@ public enum ConnectionReadout {
             if rtc < ConnectionTrace.rtcEpochCeilingUnix {
                 return "stale RTC detected (reads 1970/71)"
             }
-            let skew = rtc - wallNowUnix
+            guard let skew = measuredClockSkew else {
+                return "Verified: valid strap RTC response received"
+            }
             if skew > 120 { return "future RTC detected (\(skew)s ahead)" }
             if skew < -120 { return "stale RTC detected (\(-skew)s behind)" }
-            return "Verified: strap RTC matches wall time (skew \(skew)s)"
+            return "Verified: strap RTC matched wall time (measured skew \(skew)s)"
         }
 
         if let newest = strapNewestUnix, newest > 0 {

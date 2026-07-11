@@ -190,10 +190,46 @@ final class ConnectionReadoutTests: XCTestCase {
         XCTAssertTrue(ConnectionReadout.whoop5ClockSetSent(logLines: lines))
         XCTAssertTrue(ConnectionReadout.whoop5ClockResponseObserved(logLines: lines))
         XCTAssertNil(ConnectionReadout.whoop5VerifiedClock(logLines: lines))
-        let verified = lines + ["WHOOP 5/MG: clockState family=whoop5 state=verified rtc=1783668869 wall=1783668870 skewSeconds=-1 result=success"]
+        XCTAssertNil(ConnectionReadout.whoop5VerifiedClockSkew(logLines: lines))
+
+        let verified = lines + [
+            "WHOOP 5/MG: clockState family=whoop5 state=verified rtc=1783668869 wall=1783668870 skewSeconds=-1 result=success",
+        ]
         XCTAssertEqual(ConnectionReadout.whoop5VerifiedClock(logLines: verified), 1_783_668_869)
+        XCTAssertEqual(ConnectionReadout.whoop5VerifiedClockSkew(logLines: verified), -1)
         XCTAssertFalse(ConnectionReadout.whoop5ClockResponseObserved(logLines: verified))
-        XCTAssertFalse(ConnectionReadout.whoop5ClockSetSent(logLines: lines + ["Clock correlation reset for new whoop5 connection"]))
+        XCTAssertFalse(ConnectionReadout.whoop5ClockSetSent(
+            logLines: lines + ["Clock correlation reset for new whoop5 connection"]))
+    }
+
+    func testWhoop5VerifiedClockSkewParsesSignedValues() {
+        let reset = "Clock correlation reset for new whoop5 connection"
+        XCTAssertEqual(ConnectionReadout.whoop5VerifiedClockSkew(logLines: [
+            reset,
+            "clockState family=whoop5 state=verified rtc=1783668869 skewSeconds=-14 result=success",
+        ]), -14)
+        XCTAssertEqual(ConnectionReadout.whoop5VerifiedClockSkew(logLines: [
+            reset,
+            "clockState family=whoop5 state=verified rtc=1783668869 skewSeconds=0 result=success",
+        ]), 0)
+        XCTAssertEqual(ConnectionReadout.whoop5VerifiedClockSkew(logLines: [
+            reset,
+            "clockState family=whoop5 state=verified rtc=1783668869 skewSeconds=3 result=success",
+        ]), 3)
+    }
+
+    func testWhoop5VerifiedClockSkewDoesNotLeakAcrossConnectionsOrMalformedNewestVerification() {
+        let olderVerified =
+            "clockState family=whoop5 state=verified rtc=1783668869 skewSeconds=-14 result=success"
+        XCTAssertNil(ConnectionReadout.whoop5VerifiedClockSkew(logLines: [
+            olderVerified,
+            "Clock correlation reset for new whoop5 connection",
+        ]))
+        XCTAssertNil(ConnectionReadout.whoop5VerifiedClockSkew(logLines: [
+            "Clock correlation reset for new whoop5 connection",
+            olderVerified,
+            "clockState family=whoop5 state=verified rtc=1783668872 result=success",
+        ]), "the newest verified entry wins even when its skew field is unavailable")
     }
 
     func testWhoop5ClockStatusIsModelAwareAndHonest() {
@@ -201,33 +237,95 @@ final class ConnectionReadoutTests: XCTestCase {
         XCTAssertEqual(
             ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: nil, wallNowUnix: wall,
-                setSent: true, responseObserved: false),
+                measuredClockSkew: nil, setSent: true, responseObserved: false),
             "SET_CLOCK sent; awaiting verification")
         XCTAssertEqual(
             ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: wall - 5, wallNowUnix: wall,
-                setSent: true, responseObserved: false),
+                measuredClockSkew: nil, setSent: true, responseObserved: false),
             "Unix-time mapping active; records aligned with wall time")
         XCTAssertEqual(
             ConnectionReadout.clockStatusLabel(
-                isWhoop5: true, deviceClockUnix: wall - 1, strapNewestUnix: nil, wallNowUnix: wall,
-                setSent: true, responseObserved: false),
-            "Verified: strap RTC matches wall time (skew -1s)")
-        XCTAssertEqual(
-            ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: nil, wallNowUnix: wall,
-                setSent: true, responseObserved: true),
+                measuredClockSkew: nil, setSent: true, responseObserved: true),
             "GET_CLOCK response observed; payload format unverified")
         XCTAssertEqual(
             ConnectionReadout.clockStatusLabel(
+                isWhoop5: true, deviceClockUnix: 40_000_000, strapNewestUnix: nil, wallNowUnix: wall,
+                measuredClockSkew: -1, setSent: true, responseObserved: false),
+            "stale RTC detected (reads 1970/71)")
+        XCTAssertEqual(
+            ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: 40_000_000, wallNowUnix: wall,
-                setSent: true, responseObserved: false),
+                measuredClockSkew: nil, setSent: true, responseObserved: false),
             "stale RTC detected (reads 1970/71)")
         XCTAssertEqual(
             ConnectionReadout.clockStatusLabel(
                 isWhoop5: true, deviceClockUnix: nil, strapNewestUnix: wall + 600, wallNowUnix: wall,
-                setSent: true, responseObserved: false),
+                measuredClockSkew: nil, setSent: true, responseObserved: false),
             "future RTC detected")
+    }
+
+    func testWhoop5VerifiedClockStatusUsesStableMeasuredSkew() {
+        let first = ConnectionReadout.clockStatusLabel(
+            isWhoop5: true,
+            deviceClockUnix: 1_783_668_869,
+            strapNewestUnix: nil,
+            wallNowUnix: 1_783_668_870,
+            measuredClockSkew: -1,
+            setSent: true,
+            responseObserved: false)
+        let later = ConnectionReadout.clockStatusLabel(
+            isWhoop5: true,
+            deviceClockUnix: 1_783_668_869,
+            strapNewestUnix: nil,
+            wallNowUnix: 1_783_668_970,
+            measuredClockSkew: -1,
+            setSent: true,
+            responseObserved: false)
+        XCTAssertEqual(first, "Verified: strap RTC matched wall time (measured skew -1s)")
+        XCTAssertEqual(later, first)
+    }
+
+    func testWhoop5MeasuredClockSkewThresholds() {
+        let rtc = 1_783_668_869
+        let wall = 1_783_668_870
+        XCTAssertEqual(ConnectionReadout.clockStatusLabel(
+            isWhoop5: true, deviceClockUnix: rtc, strapNewestUnix: nil, wallNowUnix: wall,
+            measuredClockSkew: 121, setSent: true, responseObserved: false),
+        "future RTC detected (121s ahead)")
+        XCTAssertEqual(ConnectionReadout.clockStatusLabel(
+            isWhoop5: true, deviceClockUnix: rtc, strapNewestUnix: nil, wallNowUnix: wall,
+            measuredClockSkew: -121, setSent: true, responseObserved: false),
+        "stale RTC detected (121s behind)")
+        XCTAssertEqual(ConnectionReadout.clockStatusLabel(
+            isWhoop5: true, deviceClockUnix: rtc, strapNewestUnix: nil, wallNowUnix: wall,
+            measuredClockSkew: 3, setSent: true, responseObserved: false),
+        "Verified: strap RTC matched wall time (measured skew 3s)")
+    }
+
+    func testWhoop5VerifiedClockWithoutMeasuredSkewDoesNotDrift() {
+        let first = ConnectionReadout.clockStatusLabel(
+            isWhoop5: true, deviceClockUnix: 1_783_668_869, strapNewestUnix: nil,
+            wallNowUnix: 1_783_668_870, measuredClockSkew: nil,
+            setSent: true, responseObserved: false)
+        let later = ConnectionReadout.clockStatusLabel(
+            isWhoop5: true, deviceClockUnix: 1_783_668_869, strapNewestUnix: nil,
+            wallNowUnix: 1_783_678_870, measuredClockSkew: nil,
+            setSent: true, responseObserved: false)
+        XCTAssertEqual(first, "Verified: valid strap RTC response received")
+        XCTAssertEqual(later, first)
+    }
+
+    func testWhoop4ClockStatusRemainsUnchanged() {
+        XCTAssertEqual(ConnectionReadout.clockStatusLabel(
+            isWhoop5: false, deviceClockUnix: 1_782_475_600, strapNewestUnix: 40_000_000,
+            wallNowUnix: 1_900_000_000, measuredClockSkew: -999,
+            setSent: true, responseObserved: true), "yes")
+        XCTAssertEqual(ConnectionReadout.clockStatusLabel(
+            isWhoop5: false, deviceClockUnix: nil, strapNewestUnix: nil,
+            wallNowUnix: 1_900_000_000, measuredClockSkew: nil,
+            setSent: false, responseObserved: false), "no (waiting for the strap clock)")
     }
 
     func testClockLatchedLabel() {
