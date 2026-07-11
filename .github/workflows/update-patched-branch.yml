@@ -8,22 +8,39 @@ permissions:
 
 jobs:
   update:
-    name: Apply clock fix to latest NOOP
+    name: Apply personal patches to latest NOOP release
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out saved clock fix
+      - name: Check out personal patch stack
         uses: actions/checkout@v4
         with:
           ref: clock-fix-source
           fetch-depth: 0
 
-      - name: Download Ryan's latest code
+      - name: Fetch Ryan's latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git remote add upstream https://github.com/ryanbr/noop.git || true
-          git fetch upstream main
+          set -euo pipefail
 
-      - name: Create updated patched branch
+          git remote add upstream https://github.com/ryanbr/noop.git || true
+
+          LATEST_TAG=$(gh api repos/ryanbr/noop/releases/latest --jq '.tag_name')
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error::Could not determine Ryan's latest release."
+            exit 1
+          fi
+
+          echo "Ryan's latest release: $LATEST_TAG"
+
+          git fetch upstream \
+            "refs/tags/${LATEST_TAG}:refs/tags/${LATEST_TAG}"
+
+          echo "LATEST_TAG=${LATEST_TAG}" >> "$GITHUB_ENV"
+
+      - name: Apply personal patches
         shell: bash
         run: |
           set -euo pipefail
@@ -31,36 +48,42 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Start with Ryan's newest main branch.
-          git switch -C patched-latest upstream/main
+          SOURCE="origin/clock-fix-source"
 
-          # Reapply the two clock-fix commits.
-          for commit in \
-            f2c0c4f09f47e9a36ef00e0b2ba28423aecb73b5 \
-            bfe01eee59f117e2f937f1f7adb2d5f6ccf971ff
-          do
-            if git merge-base --is-ancestor "$commit" HEAD; then
-              echo "$commit is already present; skipping."
+          git fetch origin clock-fix-source
+
+          # Find the upstream commit immediately below your patch stack.
+          BASE=$(git merge-base "$LATEST_TAG" "$SOURCE")
+
+          mapfile -t PATCHES < <(
+            git rev-list --reverse --no-merges "$BASE..$SOURCE"
+          )
+
+          echo "Latest release: $LATEST_TAG"
+          echo "Found ${#PATCHES[@]} personal patch commit(s)."
+
+          # Start from Ryan's published release, not unreleased main.
+          git switch -C patched-latest "$LATEST_TAG"
+
+          for commit in "${PATCHES[@]}"; do
+            echo "Applying $(git log -1 --format='%h %s' "$commit")"
+
+            if git cherry-pick "$commit"; then
               continue
             fi
 
-            if ! git cherry-pick "$commit"; then
-              # If upstream independently added the same change, the
-              # cherry-pick can become empty rather than conflicted.
-              if [ -z "$(git status --porcelain)" ]; then
-                echo "$commit is already represented upstream; skipping."
-                git cherry-pick --skip
-              else
-                echo "::error::The clock patch conflicts with Ryan's latest changes."
-                echo "::error::Nothing was pushed. The existing patched-latest branch remains safe."
-                git cherry-pick --abort || true
-                exit 1
-              fi
+            if git diff --quiet && git diff --cached --quiet; then
+              echo "$commit is already present in Ryan's release; skipping."
+              git cherry-pick --skip
+            else
+              echo "::error::A personal patch conflicts with Ryan's latest release."
+              echo "::error::Nothing was pushed."
+              git cherry-pick --abort || true
+              exit 1
             fi
           done
 
-          # Prevent normal push-triggered build workflows from running.
           git commit --allow-empty \
-            -m "Refresh patched-latest from Ryan's upstream [skip ci]"
+            -m "Patched build based on ${LATEST_TAG} [skip ci]"
 
-          git push --force origin patched-latest
+          git push --force origin HEAD:patched-latest
