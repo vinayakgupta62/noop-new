@@ -76,6 +76,9 @@ private struct DevicesContent: View {
         let deviceClock = isWhoop5
             ? ConnectionReadout.whoop5VerifiedClock(logLines: live.log)
             : ConnectionReadout.clockCorrelatedDevice(logLines: live.log)
+        let measuredClockSkew = isWhoop5
+            ? ConnectionReadout.whoop5VerifiedClockSkew(logLines: live.log)
+            : nil
         let setSent = ConnectionReadout.whoop5ClockSetSent(logLines: live.log)
         let responseObserved = ConnectionReadout.whoop5ClockResponseObserved(logLines: live.log)
         guard deviceClock != nil || live.strapRange != nil || live.lastFrameAtUnix != nil || setSent else { return nil }
@@ -85,6 +88,7 @@ private struct DevicesContent: View {
             deviceClockUnix: deviceClock,
             strapNewestUnix: live.strapRange?.newestUnix,
             wallNowUnix: now,
+            measuredClockSkew: measuredClockSkew,
             setSent: setSent,
             responseObserved: responseObserved)
         let frame = ConnectionReadout.lastFrameLabel(lastFrameUnix: live.lastFrameAtUnix, nowUnix: now)
