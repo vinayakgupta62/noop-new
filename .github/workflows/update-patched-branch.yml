@@ -1,0 +1,66 @@
+name: Update patched branch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: Apply clock fix to latest NOOP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out saved clock fix
+        uses: actions/checkout@v4
+        with:
+          ref: clock-fix-source
+          fetch-depth: 0
+
+      - name: Download Ryan's latest code
+        run: |
+          git remote add upstream https://github.com/ryanbr/noop.git || true
+          git fetch upstream main
+
+      - name: Create updated patched branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Start with Ryan's newest main branch.
+          git switch -C patched-latest upstream/main
+
+          # Reapply the two clock-fix commits.
+          for commit in \
+            b400e605ed35df3f1a8d0ebe7ed7fdf1cfcdfcec \
+            7303c788e51ffb7cb293eddd362869f7c41f8653
+          do
+            if git merge-base --is-ancestor "$commit" HEAD; then
+              echo "$commit is already present; skipping."
+              continue
+            fi
+
+            if ! git cherry-pick "$commit"; then
+              # If upstream independently added the same change, the
+              # cherry-pick can become empty rather than conflicted.
+              if [ -z "$(git status --porcelain)" ]; then
+                echo "$commit is already represented upstream; skipping."
+                git cherry-pick --skip
+              else
+                echo "::error::The clock patch conflicts with Ryan's latest changes."
+                echo "::error::Nothing was pushed. The existing patched-latest branch remains safe."
+                git cherry-pick --abort || true
+                exit 1
+              fi
+            fi
+          done
+
+          # Prevent normal push-triggered build workflows from running.
+          git commit --allow-empty \
+            -m "Refresh patched-latest from Ryan's upstream [skip ci]"
+
+          git push --force origin patched-latest
