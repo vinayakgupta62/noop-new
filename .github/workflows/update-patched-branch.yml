@@ -36,8 +36,8 @@ jobs:
 
           # Reapply the two clock-fix commits.
           for commit in \
-            b400e605ed35df3f1a8d0ebe7ed7fdf1cfcdfcec \
-            7303c788e51ffb7cb293eddd362869f7c41f8653
+            f2c0c4f09f47e9a36ef00e0b2ba28423aecb73b5 \
+            bfe01eee59f117e2f937f1f7adb2d5f6ccf971ff
           do
             if git merge-base --is-ancestor "$commit" HEAD; then
               echo "$commit is already present; skipping."
